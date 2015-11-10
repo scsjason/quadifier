@@ -41,7 +41,7 @@
 			<Tool
 				Name="VCCLCompilerTool"
 				Optimization="0"
-				AdditionalIncludeDirectories="$(usr)\include\vrpn"
+				AdditionalIncludeDirectories="C:\usr\\include\vrpn"
 				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE"
 				MinimalRebuild="true"
 				BasicRuntimeChecks="3"
@@ -63,6 +63,7 @@
 				Name="VCLinkerTool"
 				AdditionalDependencies="vrpn.lib"
 				LinkIncremental="2"
+				AdditionalLibraryDirectories="C:\usr\lib"
 				GenerateDebugInformation="true"
 				SubSystem="1"
 				TargetMachine="1"

@@ -1,6 +1,8 @@
 #include <iostream>
 #include <vector>
+#include <ctime>
 #include <conio.h>
+#include <math.h>
 #include <winsock2.h>
 #include "vrpn_Analog.h"
 #include "vrpn_Tracker.h"
@@ -82,6 +84,33 @@ struct TrackerData {
         rotation[2] = static_cast<float>( tracker.quat[2] * scale );
         rotation[3] = static_cast<float>( tracker.quat[3] * scale );
     }
+
+	/// fill in the structure, given VRPN tracking data
+	void set(float pX, float pY, float pZ, float q0, float q1, float q2, float q3, unsigned long tStamp, int sensorID) {
+		// time in seconds
+		timeStamp = (float)tStamp;
+
+		// sensor number
+		sensor = sensorID;
+
+		// position
+		position[0] = pX;
+		position[1] = pY;
+		position[2] = pZ;
+
+		// calculate scale factor to normalise the quaternion
+		double sum = 0.0;
+		float quat[4] = { q0, q1, q2, q3 };
+		for (unsigned i = 0; i<4; i++)
+			sum += quat[i] * quat[i];
+		double scale = 1.0 / sqrt(sum);
+
+		// orientation quaternion (normalise before sending to Unity)
+		rotation[0] = static_cast<float>(quat[0] * scale);
+		rotation[1] = static_cast<float>(quat[1] * scale);
+		rotation[2] = static_cast<float>(quat[2] * scale);
+		rotation[3] = static_cast<float>(quat[3] * scale);
+	}
 };
 #pragma pack (pop)
 
@@ -374,44 +403,203 @@ void Server::closeWinsock() {
 //-----------------------------------------------------------------------------
 
 unsigned frames = 0;
+unsigned long tStamp = -1;
+bool debugOutput = false;
+float gpX = 0, gpY = 0, gpZ = 0, gq0 = 0, gq1 = 0, gq2 = 0, gq3 = 1;
 
 void VRPN_CALLBACK handleTracker( void *userData, const vrpn_TRACKERCB tracker ) {
     Server *server = reinterpret_cast<Server*>( userData );
 
+	static int first = 1;
+
     if (tracker.sensor == 0) ++frames;
 
-    cout << "Tracker " << tracker.sensor << ": "
-         << tracker.pos[0]  << ',' <<  tracker.pos[1]  << ',' << tracker.pos[2]  << ','
-         << tracker.quat[0] << ',' <<  tracker.quat[1] << ',' << tracker.quat[2] << ','
-         << tracker.quat[3]
-         << endl;
-
-     // tracker data to send to Unity client
-     TrackerData data;
-     data.set( tracker );
-
-     // send the data
-     server->send( data );
+if (first || debugOutput) {
+	cout << "Seen tracked object:\n";
+	cout << "Tracker " << tracker.sensor << ": "
+		<< tracker.pos[0] << ',' << tracker.pos[1] << ',' << tracker.pos[2] << ','
+		<< tracker.quat[0] << ',' << tracker.quat[1] << ',' << tracker.quat[2] << ','
+		<< tracker.quat[3]
+		<< endl;
+	first = 0;
 }
 
-int main (int , char **)
+// Set global data
+gpX = tracker.pos[0];
+gpY = tracker.pos[1];
+gpZ = tracker.pos[2];
+gq0 = tracker.quat[0];
+gq1 = tracker.quat[1];
+gq2 = tracker.quat[2];
+gq3 = tracker.quat[3];
+
+// tracker data to send to Unity client
+TrackerData data;
+data.set(tracker);
+
+// send the data
+server->send(data);
+
+struct timeval currentTime;
+vrpn_gettimeofday(&currentTime, NULL);
+tStamp = currentTime.tv_usec + (1000000L * currentTime.tv_sec);
+}
+
+// String equality test (case insensitive)
+// PORT: not all platforms have stricmp(), 
+#define strieq(a,b) (stricmp(a,b)==0)
+
+vrpn_Tracker_Remote *tracker;
+
+// To handle ctrl-C from console to kill vrpnbridge
+BOOL WINAPI consoleHandler(DWORD signal) {
+
+	if (signal == CTRL_C_EVENT)
+		printf("Ctrl-C caught\n"); // do cleanup
+
+	// Bit harsh . . .
+	delete tracker;
+
+	exit(0);
+
+	return TRUE;
+}
+
+int main(int Argc, char **Argv)
 {
-    Server server;
-    server.start();
 
-    vrpn_Tracker_Remote tracker( "Tracker0@localhost" );
+	const char *_tObj = NULL;
+	bool errFlag = false;
+	unsigned long tLimit = 10000;
 
-    tracker.register_change_handler( &server, handleTracker );
+	// Good values for the cube
+	/*
+	gpX = -0.105992;
+	gpY = 1.40699;
+	gpZ = 1.48177;
+	gq0 = -0.104662;
+	gq1 = -0.108086;
+	gq2 = 0.0404521;
+	gq3 = 0.987789;
+	*/
 
-    // record start time
-    float t = (float)clock()/CLOCKS_PER_SEC;
+	// Try to catch CtrlC in the console
+	if (!SetConsoleCtrlHandler(consoleHandler, TRUE)) {
+		cerr << "\nERROR: Could not set control handler";
+		errFlag = true;
+	}
 
-    while (!kbhit())
-        tracker.mainloop();
+	if (Argc <= 1) {
+		cerr << "Error: No args. Need at least -object <objectname>\n";
+		errFlag = true;
+	}
+
+	// process command line arguments
+	for (int n = 1; n < Argc; n++) {
+		// get nth argument
+		const char *arg = Argv[n];
+
+		// check for our options
+		if (strieq(arg, "-obj") || strieq(arg, "-object")) {
+			if (n >= (Argc - 1)) {
+				cerr << "Error: -object arg needs a name of an object to track, e.g Glasses01@HIVE-CO31958\n";
+				errFlag = true;
+			}
+			else {
+				_tObj = Argv[++n];
+			}
+		}
+		else if (strieq(arg, "-debug")) {
+			debugOutput = true;
+		}
+		else if (strieq(arg, "-tLimit")) {
+			if (n >= (Argc - 1)) {
+				cerr << "Error: -tLimit arg needs an integer value\n";
+				errFlag = true;
+			}
+			else {
+				tLimit = atoi(Argv[++n]);
+			}
+		}
+		else if (strieq(arg, "-initLoc")) {
+			if (n >= (Argc - 7)) {
+				cerr << "Error: -initLoc arg needs 7 float values\n";
+				errFlag = true;
+			}
+			else {
+				gpX = atof(Argv[++n]);
+				gpY = atof(Argv[++n]);
+				gpZ = atof(Argv[++n]);
+				gq0 = atof(Argv[++n]);
+				gq1 = atof(Argv[++n]);
+				gq2 = atof(Argv[++n]);
+				gq3 = atof(Argv[++n]);
+			}
+		}
+		else if (strieq(arg, "-h") || strieq(arg, "-help")) {
+			cout << "Input args: \n";
+			cout << "-object <objectname> where objectname is of the form \n";
+			cout << "        object@hostname, e.g. Glasses01@HIVE-CO31958\n";
+			cout << "[-debug] turns on debugging output.\n";
+			cout << "[-tLimit <timelimit>] where timelimit is an integer value\n";
+			cout << "        in microseconds of how long to wait until \"fake\" \n";
+			cout << "        tracker data is sent. The fake data is the initial \n";
+			cout << "        location specified with -initLoc, or the last seen \n";
+			cout << "        location.\n";
+			cout << "[-initLoc pX pY pZ q0 q1 q2 q3] this is the initial location \n";
+			cout << "        reported for the object until it is first reported by\n";
+			cout << "        the tracking system.\n";
+			exit(0);
+		}
+		else {
+			cerr << "Error: Unknown arg " << arg << "\n";
+			errFlag = true;
+		}
+	}
+
+	// Catch any errors
+	if (errFlag) {
+		cerr << "Use -help to list accepted arguments\n";
+		cerr << "Press any key to exit!\n";
+		cin.get();
+		exit(0);
+	}
+
+	Server server;
+	server.start();
+
+	tracker = new vrpn_Tracker_Remote(_tObj);
+
+	tracker->register_change_handler(&server, handleTracker);
+
+	// record start time
+	float t = (float)clock() / CLOCKS_PER_SEC;
+
+	struct timeval currentTime;
+	unsigned long tStamp2;
+	
+
+	while (!_kbhit()) {
+		tracker->mainloop();
+
+		vrpn_gettimeofday(&currentTime, NULL);
+		tStamp2 = currentTime.tv_usec + (1000000L * currentTime.tv_sec);
+		if ((tStamp2 - tStamp) > tLimit) {
+			tStamp = tStamp2;
+			if (debugOutput)
+				cout << "Faking data: " << gpX << "," << gpY << "," << gpZ << "," << gq0 << "," << gq1 << "," << gq2 << "," << gq3 << "\n";
+			// tracker data to send to Unity client
+			TrackerData data;
+			data.set(gpX,gpY,gpZ,gq0,gq1,gq2,gq3, tStamp2, 0);
+			// send the data
+			server.send(data);
+		}	
+	}
 
     server.stop();
 
-    tracker.unregister_change_handler( &server, handleTracker );
+    tracker->unregister_change_handler( &server, handleTracker );
+	delete tracker;
 
     // calculate update rate achieved (for Razer Hydra, I get 250Hz)
     t = (float)clock()/CLOCKS_PER_SEC - t;
